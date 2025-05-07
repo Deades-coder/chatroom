@@ -5,9 +5,9 @@ spring:
     name: Redis2
   data:
     redis:
-      host:
-      port:
-      database:
+      host: 8.153.161.150
+      port: 6389
+      database: 1
 
 
 

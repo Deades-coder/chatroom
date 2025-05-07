@@ -47,7 +47,7 @@ public class ChatPageController {
         }
         try {
             System.out.println("User attempting to join chat: " + username);
-            chatService.joinChat(username, null);
+//            chatService.joinChat(username, null);
             System.out.println("User " + username + " joined chat successfully");
             String redirectUrl = UriComponentsBuilder.fromPath("/chat")
                     .queryParam("username", username)
