@@ -1,0 +1,13 @@
+server:
+  port: 8123
+spring:
+  application:
+    name: Redis2
+  data:
+    redis:
+      host:
+      port:
+      database:
+
+
+

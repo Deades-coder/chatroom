@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="zh-CN" xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <title>WebSocket 聊天室</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/sockjs-client/1.6.1/sockjs.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/stomp.js/2.3.3/stomp.min.js"></script>
+    <style>
+        #chatArea {
+            height: 400px;
+            overflow-y: auto;
+            border: 1px solid #ccc;
+            padding: 10px;
+            background-color: #f8f9fa;
+        }
+        .message {
+            margin-bottom: 10px;
+        }
+        .message .timestamp {
+            color: #6c757d;
+            font-size: 0.8em;
+        }
+        .message .sender {
+            font-weight: bold;
+        }
+        #groupList .badge {
+            cursor: pointer;
+        }
+        #connectionStatus {
+            font-size: 0.9em;
+        }
+    </style>
+</head>
+<body>
+<div class="container mt-4">
+    <h2 class="mb-4">WebSocket 聊天室</h2>
+
+    <div th:if="${error}" class="alert alert-danger" th:text="${error}"></div>
+
+    <div th:if="${username == null}" class="card mb-4">
+        <div class="card-body">
+            <h5 class="card-title">登录</h5>
+            <form th:action="@{/chat/login}" method="post">
+                <div class="mb-3">
+                    <label for="username" class="form-label">用户名：</label>
+                    <input type="text" id="username" name="username" class="form-control" required>
+                </div>
+                <button type="submit" class="btn btn-primary">连接</button>
+            </form>
+        </div>
+    </div>
+
+    <div th:if="${username != null}" class="card">
+        <div class="card-body">
+            <h5 class="card-title">欢迎，<span th:text="${username}"></span>！
+                <span id="connectionStatus" class="text-muted">（连接中...）</span>
+            </h5>
+            <div class="mb-3">
+                <form th:action="@{/chat/logout}" method="post" class="d-inline">
+                    <input type="hidden" name="username" th:value="${username}">
+                    <button type="submit" class="btn btn-danger">断开连接</button>
+                </form>
+                <button id="reconnectButton" onclick="connect()" class="btn btn-warning" >重新连接</button>
+            </div>
+
+            <div class="mb-3">
+                <label for="groupId" class="form-label">加入群组：</label>
+                <div class="input-group">
+                    <input type="text" id="groupId" class="form-control" placeholder="输入群组 ID（如 group1）">
+                    <button id="joinButton" onclick="joinGroup()" class="btn btn-secondary" >加入</button>
+                </div>
+                <div id="groupList" class="mt-2">
+                    <span class="text-muted">已加入的群组： </span>
+                    <span id="groups"></span>
+                </div>
+            </div>
+
+            <div class="mb-3">
+                <label for="recipient" class="form-label">私聊对象：</label>
+                <input type="text" id="recipient" class="form-control" placeholder="输入用户名（如 user2）">
+            </div>
+
+            <div class="mb-3">
+                <label for="messageInput" class="form-label">消息：</label>
+                <div class="input-group">
+                    <input type="text" id="messageInput" class="form-control" placeholder="输入消息">
+                    <button id="broadcastButton" onclick="sendBroadcast()" class="btn btn-primary" >广播</button>
+                    <button id="groupButton" onclick="sendGroup()" class="btn btn-info" >群组</button>
+                    <button id="privateButton" onclick="sendPrivate()" class="btn btn-success" >私聊</button>
+                </div>
+            </div>
+
+            <div id="chatArea" class="card p-3"></div>
+        </div>
+    </div>
+</div>
+
+<script>
+    let stompClient = null;
+    const username = /*[[${username}]]*/ (new URLSearchParams(window.location.search)).get('username') || 'guest';
+
+    let joinedGroups = [];
+    let connectionAttempts = 0;
+    const maxAttempts = 3;
+
+    console.log("Injected username from Thymeleaf: ", username);
+    if (window.location.search) {
+        console.log("Query string: ", window.location.search);
+    }
+
+    function updateConnectionStatus(status, color) {
+        const statusElement = document.getElementById('connectionStatus');
+        statusElement.textContent = `(${status})`;
+        statusElement.style.color = color;
+    }
+
+    function enableButtons(enabled) {
+        document.getElementById('joinButton').disabled = !enabled;
+        document.getElementById('broadcastButton').disabled = !enabled;
+        document.getElementById('groupButton').disabled = !enabled;
+        document.getElementById('privateButton').disabled = !enabled;
+        document.getElementById('reconnectButton').disabled = enabled;
+    }
+
+    function connect() {
+        if (!username) {
+            alert('请先登录');
+            return;
+        }
+        if (connectionAttempts >= maxAttempts) {
+            updateConnectionStatus('连接失败，已达最大重试次数', 'red');
+            enableButtons(false);
+            return;
+        }
+        connectionAttempts++;
+        console.log(`尝试连接 WebSocket (第 ${connectionAttempts}/${maxAttempts} 次)`);
+        const socket = new SockJS('/ws');
+        stompClient = Stomp.over(socket);
+        stompClient.connect({ username: username }, function (frame) {
+            console.log('WebSocket 连接成功: ' + frame);
+            connectionAttempts = 0;
+            updateConnectionStatus('已连接', 'green');
+            enableButtons(true);
+            stompClient.subscribe('/topic/broadcast', function (message) {
+                showMessage(JSON.parse(message.body));
+            });
+            stompClient.subscribe('/user/' + username + '/private', function (message) {
+                showMessage(JSON.parse(message.body));
+            });
+            showMessage({ type: 'system', sender: '系统', content: '已连接为 ' + username });
+        }, function (error) {
+            console.error('WebSocket 连接错误: ', error);
+            updateConnectionStatus(`连接失败 (尝试 ${connectionAttempts}/${maxAttempts})`, 'red');
+            showMessage({ type: 'system', sender: '系统', content: '连接失败: ' + error });
+            setTimeout(connect, 3000);
+        });
+    }
+
+    function joinGroup() {
+        if (!stompClient || !stompClient.connected) {
+            alert('请先连接聊天室');
+            return;
+        }
+        const groupId = document.getElementById('groupId').value.trim();
+        if (!groupId) {
+            alert('请输入群组 ID');
+            return;
+        }
+        if (joinedGroups.includes(groupId)) {
+            alert('您已在群组 ' + groupId + ' 中');
+            return;
+        }
+        stompClient.subscribe('/topic/group/' + groupId, function (message) {
+            showMessage(JSON.parse(message.body));
+        });
+        fetch('/api/chat/join', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username: username, groupId: groupId })
+        }).then(response => {
+            if (response.ok) {
+                joinedGroups.push(groupId);
+                updateGroupList();
+                showMessage({ type: 'system', sender: '系统', content: '已加入群组: ' + groupId });
+                document.getElementById('groupId').value = '';
+            } else {
+                showMessage({ type: 'system', sender: '系统', content: '加入群组失败: ' + groupId });
+            }
+        }).catch(error => {
+            console.error('加入群组错误:', error);
+            showMessage({ type: 'system', sender: '系统', content: '加入群组错误: ' + error });
+        });
+    }
+
+    function updateGroupList() {
+        const groupList = document.getElementById('groups');
+        groupList.innerHTML = joinedGroups.map(group =>
+            `<span class="badge bg-info me-1">${group}</span>`
+        ).join('');
+    }
+
+    function disconnect() {
+        if (stompClient !== null) {
+            stompClient.disconnect();
+            updateConnectionStatus('已断开', 'gray');
+            enableButtons(false);
+            showMessage({ type: 'system', sender: '系统', content: '已断开连接' });
+            joinedGroups = [];
+            updateGroupList();
+        }
+    }
+
+    function sendBroadcast() {
+        if (!stompClient || !stompClient.connected) {
+            alert('请先连接聊天室');
+            return;
+        }
+        const content = document.getElementById('messageInput').value.trim();
+        if (!content) {
+            alert('请输入消息');
+            return;
+        }
+        stompClient.send('/app/chat/broadcast', {}, JSON.stringify({
+            sender: username,
+            content: content
+        }));
+        document.getElementById('messageInput').value = '';
+    }
+
+    function sendGroup() {
+        if (!stompClient || !stompClient.connected) {
+            alert('请先连接聊天室');
+            return;
+        }
+        const content = document.getElementById('messageInput').value.trim();
+        const groupId = document.getElementById('groupId').value.trim();
+        if (!content) {
+            alert('请输入消息');
+            return;
+        }
+        if (!groupId) {
+            alert('请输入群组 ID');
+            return;
+        }
+        if (!joinedGroups.includes(groupId)) {
+            alert('请先加入群组 ' + groupId);
+            return;
+        }
+        stompClient.send('/app/chat/group', {}, JSON.stringify({
+            sender: username,
+            recipient: groupId,
+            content: content
+        }));
+        document.getElementById('messageInput').value = '';
+    }
+
+    function sendPrivate() {
+        if (!stompClient || !stompClient.connected) {
+            alert('请先连接聊天室');
+            return;
+        }
+        const content = document.getElementById('messageInput').value.trim();
+        const recipient = document.getElementById('recipient').value.trim();
+        if (!content) {
+            alert('请输入消息');
+            return;
+        }
+        if (!recipient) {
+            alert('请输入接收者');
+            return;
+        }
+        console.log('Sending private message: ', { sender: username, recipient: recipient, content: content });
+        stompClient.send('/app/chat/private', {}, JSON.stringify({
+            sender: username,
+            recipient: recipient,
+            content: content
+        }));
+        document.getElementById('messageInput').value = '';
+    }
+
+    function showMessage(message) {
+        console.log('Rendering message: ', message);
+        const chatArea = document.getElementById('chatArea');
+        if (!chatArea) {
+            console.error('chatArea element not found');
+            return;
+        }
+        const div = document.createElement('div');
+        div.className = 'message';
+        const messageContent = `<span class="timestamp">[${message.timestamp || new Date().toISOString()}]</span>` +
+            `<span class="sender">${message.sender || '未知发送者'}</span>: ` +
+            `${message.content || '无内容'}` +
+            `<span class="badge bg-secondary">${message.type || '未知类型'}</span>`;
+        console.log('Generated message HTML: ', messageContent);
+        div.innerHTML = messageContent;
+        chatArea.appendChild(div);
+        console.log('Appended message to chatArea, child count: ', chatArea.childElementCount);
+        chatArea.scrollTop = chatArea.scrollHeight;
+    }
+
+    if (username) {
+        connect();
+    }
+</script>
+</body>
+</html>
